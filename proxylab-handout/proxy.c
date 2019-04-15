@@ -7,9 +7,20 @@
 
 /* You won't lose style points for including this long line in your code */
 static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3\r\n";
+static const char *conn_hdr = "Connection: close\r\n";
+static const char *prox_hdr = "Proxy-Connection: close\r\n";
+static const char *host_hdr_format = "Host %s\r\n";
+static const char *requestlint_hdr_format = "GET %s HTTP/1.0\r\n"
+static const char *endof_hdr = "\r\n";
+
+static const char *connection_key = "Connection";
+static const char *user_agent_key = "User-Agent";
+static const char *proxy_connection_key = "Proxy-Connection";
+static const char *host_key = "Host";
 
 void doit(int connfd);
 void parse_uri(char* uri, char* hostname, char* path, int* port);
+void build_http_header(char* http_header, char* hostname, char* path, int port, rio_t* client_rio);
 
 int main()
 {
@@ -57,6 +68,7 @@ void doit(int connfd) {
 		return;
 	}
 
+
 }
 
 void parse_uri(char* uri, char* hostname, char* path, int* port) {
@@ -86,5 +98,31 @@ void parse_uri(char* uri, char* hostname, char* path, int* port) {
 			sscanf(pos, "%s", hostname);
 		}
 	}
+	return;
+}
+
+void build_http_header(char* http_header, char* hostname, char* path, int port, rio_t* client_rio) {
+	char request_hdr[MAXLINE], buf[MAXLINE], host_hdr[MAXLINE], other_hdr[MAXLINE];
+	sprintf(request_hdr, requestlint_hdr_format, path);
+
+	while(Rio_readlineb(client_rio, buf, MAXLINE) > 0) {
+		if (strcmp(buf, endof_hdr) == 0) {
+			break;
+		}
+		if (!strncasecmp(buf, host_key, strlen(host_key))) {
+			strcpy(host_hdr, buf);
+		}
+		if (strncasecmp(buf, connection_key, strlen(connection_key)) 
+			&& strncasecmp(buf, proxy_connection_key, strlen(proxy_connection_key)) 
+			&& strncasecmp(buf, user_agent_key, strlen(user_agent_key))) {
+			strcat(other_hdr, buf);
+		}
+	}
+	if (strlen(host_hdr) == 0) {
+		sprintf(host_hdr, host_hdr_format, hostname);
+	}
+	sprintf(http_header, "%s%s%s%s%s%s%s",
+		request_hdr, host_hdr, conn_hdr, prox_hdr,
+		user_agent_hdr, other_hdr, endof_hdr);
 	return;
 }

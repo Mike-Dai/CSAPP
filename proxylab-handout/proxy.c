@@ -1,5 +1,5 @@
 #include <stdio.h>
-
+#include "csapp.h"
 /* Recommended max cache and object sizes */
 #define MAX_CACHE_SIZE 1049000
 #define MAX_OBJECT_SIZE 102400
@@ -10,7 +10,7 @@ static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64;
 static const char *conn_hdr = "Connection: close\r\n";
 static const char *prox_hdr = "Proxy-Connection: close\r\n";
 static const char *host_hdr_format = "Host %s\r\n";
-static const char *requestlint_hdr_format = "GET %s HTTP/1.0\r\n"
+static const char *requestlint_hdr_format = "GET %s HTTP/1.0\r\n";
 static const char *endof_hdr = "\r\n";
 
 static const char *connection_key = "Connection";
@@ -21,8 +21,9 @@ static const char *host_key = "Host";
 void doit(int connfd);
 void parse_uri(char* uri, char* hostname, char* path, int* port);
 void build_http_header(char* http_header, char* hostname, char* path, int port, rio_t* client_rio);
+int connect_endServer(char *hostname, int port, char *http_header);
 
-int main()
+int main(int argc, char** argv)
 {
     int listenfd,connfd;
     socklen_t clientlen;
@@ -62,13 +63,37 @@ void doit(int connfd) {
 
 	Rio_readinitb(&rio, connfd);
 	Rio_readlineb(&rio, buf, MAXLINE);
-	sscanf(rio, "%s %s %s", method, uri, version);
+	sscanf(buf, "%s %s %s", method, uri, version);
 	if (strcasecmp(method, "GET")) {
 		printf("Does not implement this method\n");
 		return;
 	}
 
+	parse_uri(uri, hostname, path, &port);
+	
+	build_http_header(endserver_http_header, hostname, path, port, &rio);
+	
+	end_serverfd = connect_endServer(hostname, port, endserver_http_header);
+	if (end_serverfd < 0) {
+		printf("Connection failed\n");
+		return;
+	}
 
+	Rio_readinitb(&server_rio, end_serverfd);
+	Rio_writen(end_serverfd, endserver_http_header, strlen(endserver_http_header));
+
+	size_t n;
+	while ((n = Rio_readlineb(&server_rio, buf, MAXLINE)) != 0) {
+		printf("receive %d bytes from server", n);
+		Rio_writen(connfd, buf, n);
+	}
+	Close(end_serverfd);
+}
+
+inline int connect_endServer(char *hostname, int port, char *http_header) {
+	char portStr[100];
+	sprintf(portStr, "%d", port);
+	return Open_clientfd(hostname, portStr);
 }
 
 void parse_uri(char* uri, char* hostname, char* path, int* port) {
@@ -87,7 +112,7 @@ void parse_uri(char* uri, char* hostname, char* path, int* port) {
 		sscanf(pos2+1, "%d%s", port, path);
 	}
 	else {
-		pos2 = strstr(pos "/");
+		pos2 = strstr(pos, "/");
 		if (pos2 != NULL) {
 			*pos2 = '\0';
 			sscanf(pos, "%s", hostname);
@@ -101,7 +126,7 @@ void parse_uri(char* uri, char* hostname, char* path, int* port) {
 	return;
 }
 
-void build_http_header(char* http_header, char* hostname, char* path, int port, rio_t* client_rio) {
+void build_http_header(char* http_header, char* hostname, char* path, int port, rio_t *client_rio) {
 	char request_hdr[MAXLINE], buf[MAXLINE], host_hdr[MAXLINE], other_hdr[MAXLINE];
 	sprintf(request_hdr, requestlint_hdr_format, path);
 

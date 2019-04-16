@@ -3,6 +3,7 @@
 /* Recommended max cache and object sizes */
 #define MAX_CACHE_SIZE 1049000
 #define MAX_OBJECT_SIZE 102400
+#define CACHE_OBJS_COUNT 10
 #define MAX_HOST_LEN 100
 
 /* You won't lose style points for including this long line in your code */
@@ -23,6 +24,33 @@ void parse_uri(char* uri, char* hostname, char* path, int* port);
 void build_http_header(char* http_header, char* hostname, char* path, int port, rio_t* client_rio);
 int connect_endServer(char *hostname, int port, char *http_header);
 void *thread(void *vargp);
+void readerPre(int i);
+void readerAfter(int i);
+void writePre(int i);
+void writeAfter(int i);
+
+typedef struct {
+	char cache_obj[MAX_OBJECT_SIZE];
+	char cache_url[MAXLINE];
+	int LRU;
+	int isEmpty;
+
+	int readCnt;
+	sem_t wmutex;
+	sem_t rdcntmutex;
+
+	int writeCnt;
+	sem_t wtcntmutex;
+	sem_t queue;
+
+}cache_block;
+
+typedef struct {
+	cache_block cacheobjs[CACHE_OBJS_COUNT];
+	int cache_num;
+}Cache;
+
+Cache cache;
 
 int main(int argc, char** argv)
 {
@@ -154,4 +182,48 @@ void build_http_header(char* http_header, char* hostname, char* path, int port, 
 		request_hdr, host_hdr, conn_hdr, prox_hdr,
 		user_agent_hdr, other_hdr, endof_hdr);
 	return;
+}
+
+void readerPre(int i) {
+	cache_block cacheobj = cache.cacheobjs[i];
+	P(&cacheobj.queue);
+	P(&cacheobj.rdcntmutex);
+	cacheobj.readCnt++;
+	if (cacheobj.readCnt == 1) {
+		P(&cacheobj.wmutex);
+	}
+	V(&cacheobj.rdcntmutex);
+	V(&cacheobj.queue);
+}
+
+void readerAfter(int i) {
+	cache_block cacheobj = cache.cacheobjs[i];
+	P(&cacheobj.rdcntmutex);
+	cacheobj.readCnt--;
+	if (cacheobj.readCnt == 0) {
+		V(&cacheobj.wmutex);
+	}
+	V(&cacheobj.rdcntmutex);
+}
+
+void writePre(int i) {
+	cache_block cacheobj = cache.cacheobjs[i];
+	P(&cacheobj.wtcntmutex);
+	cacheobj.writeCnt++;
+	if (cacheobj.writeCnt == 1) {
+		P(&cacheobj.queue);
+	}
+	V(&cacheobj.wtcntmutex);
+	P(&cacheobj.wmutex);
+}
+
+void writeAfter(int i) {
+	cache_block cacheobj = cache.cacheobjs[i];
+	V(&cacheobj.wmutex);
+	P(&cacheobj.wtcntmutex);
+	cacheobj.writeCnt--;
+	if (cacheobj.writeCnt == 0) {
+		V(&cacheobj.queue);
+	}
+	V(&cacheobj.wtcntmutex);
 }

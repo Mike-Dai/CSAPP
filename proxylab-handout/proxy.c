@@ -4,6 +4,7 @@
 #define MAX_CACHE_SIZE 1049000
 #define MAX_OBJECT_SIZE 102400
 #define CACHE_OBJS_COUNT 10
+#define LRU_MAGIC_NUM 9999;
 #define MAX_HOST_LEN 100
 
 /* You won't lose style points for including this long line in your code */
@@ -26,8 +27,14 @@ int connect_endServer(char *hostname, int port, char *http_header);
 void *thread(void *vargp);
 void readerPre(int i);
 void readerAfter(int i);
-void writePre(int i);
-void writeAfter(int i);
+void writerPre(int i);
+void writerAfter(int i);
+void cache_init();
+int cache_find();
+int cache_eviction();
+void cache_lru(int i);
+void cache_uri(char *uri, char *buf);
+
 
 typedef struct {
 	char cache_obj[MAX_OBJECT_SIZE];
@@ -65,6 +72,8 @@ int main(int argc, char** argv)
     	exit(1);
     }
 
+    cache_init();
+
     listenfd = Open_listenfd(argv[1]);
     while(1) {
     	clientlen = sizeof(clientaddr);
@@ -96,12 +105,27 @@ void doit(int connfd) {
 	Rio_readinitb(&rio, connfd);
 	Rio_readlineb(&rio, buf, MAXLINE);
 	sscanf(buf, "%s %s %s", method, uri, version);
+
+	char uri_store[100];
+	strcpy(uri_store, uri);
+
 	if (strcasecmp(method, "GET")) {
 		printf("Does not implement this method\n");
 		return;
 	}
 
+	int index;
+	if ((index = cache_find()) != -1) {
+		readerPre(index);
+		Rio_writen(connfd, cache.cacheobjs[index].cache_obj, strlen(cache.cacheobjs[index].cache_obj));
+		readerAfter(index);
+		cache_lru(index);
+		return;
+	}
+
 	parse_uri(uri, hostname, path, &port);
+
+	
 	
 	build_http_header(endserver_http_header, hostname, path, port, &rio);
 	
@@ -114,10 +138,19 @@ void doit(int connfd) {
 	Rio_readinitb(&server_rio, end_serverfd);
 	Rio_writen(end_serverfd, endserver_http_header, strlen(endserver_http_header));
 
+	int size = 0;
+	char cachebuf[MAX_OBJECT_SIZE];
 	size_t n;
 	while ((n = Rio_readlineb(&server_rio, buf, MAXLINE)) != 0) {
+		size += n;
+		if (size < MAX_OBJECT_SIZE) {
+			strcat(cachebuf, buf);
+		}
 		printf("receive %d bytes from server", n);
 		Rio_writen(connfd, buf, n);
+	}
+	if (size < MAX_OBJECT_SIZE) {
+		cache_uri(uri_store, cachebuf);
 	}
 	Close(end_serverfd);
 }
@@ -206,7 +239,7 @@ void readerAfter(int i) {
 	V(&cacheobj.rdcntmutex);
 }
 
-void writePre(int i) {
+void writerPre(int i) {
 	cache_block cacheobj = cache.cacheobjs[i];
 	P(&cacheobj.wtcntmutex);
 	cacheobj.writeCnt++;
@@ -217,7 +250,7 @@ void writePre(int i) {
 	P(&cacheobj.wmutex);
 }
 
-void writeAfter(int i) {
+void writerAfter(int i) {
 	cache_block cacheobj = cache.cacheobjs[i];
 	V(&cacheobj.wmutex);
 	P(&cacheobj.wtcntmutex);
@@ -226,4 +259,82 @@ void writeAfter(int i) {
 		V(&cacheobj.queue);
 	}
 	V(&cacheobj.wtcntmutex);
+}
+
+void cache_init() {
+	int i;
+	for (i = 0; i < MAX_CACHE_SIZE; i++) {
+		cache_block cacheobj = cache.cacheobjs[i];
+		cacheobj.LRU = 0;
+		cacheobj.isEmpty = 1;
+		Sem_init(&cacheobj.wmutex, 0, 1);
+		Sem_init(&cacheobj.wtcntmutex, 0, 1);
+		Sem_init(&cacheobj.rdcntmutex, 0, 1);
+		Sem_init(&cacheobj.queue, 0, 1);
+		cacheobj.readCnt = 0;
+		cacheobj.writeCnt = 0;
+	}
+	cache.cache_num = 0;
+}
+
+int cache_find(char *uri) {
+	int i;
+	for (i = 0; i < MAX_CACHE_SIZE; i++) {
+		cache_block cacheobj = cache.cacheobjs[i];
+		readerPre(i);
+		if ((cacheobj.isEmpty == 0) && (strcmp(cacheobj.cache_url, uri) == 0)) {
+			readerAfter(i);
+			return i;
+		}
+		readerAfter(i);
+	}
+	return -1;
+}
+
+int cache_eviction() {
+	int i;
+	int min = LRU_MAGIC_NUM;
+	int minindex = 0;
+	for (i = 0; i < MAX_CACHE_SIZE; i++) {
+		cache_block cacheobj = cache.cacheobjs[i];
+		readerPre(i);
+		if (cacheobj.isEmpty == 1) {
+			readerAfter(i);
+			return i;
+		}
+		if (cacheobj.LRU < min) {
+			minindex = i;
+			readerAfter(i);
+			continue;
+		}
+		readerAfter(i);
+	}
+	return minindex;
+}
+
+void cache_lru(int index) {
+	int i;
+	for (i = 0; i < MAX_CACHE_SIZE; i++) {
+		cache_block cacheobj = cache.cacheobjs[i];
+		writerPre(i);
+		if (i == index) {
+			cacheobj.LRU = LRU_MAGIC_NUM;
+			writerAfter(i);
+		}
+		else if (cacheobj.isEmpty == 0) {
+			cacheobj.LRU--;
+			writerAfter(i);
+		}
+	}
+}
+
+void cache_uri(char *uri, char *buf) {
+	int i = cache_eviction();
+	cache_block cacheobj = cache.cacheobjs[i];
+	writerPre(i);
+	strcpy(cacheobj.cache_url, uri);
+	strcpy(cacheobj.cache_obj, buf);
+	cacheobj.isEmpty = 0;
+	writerAfter(i);
+	cache_lru(i);
 }
